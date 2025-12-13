@@ -1,0 +1,21 @@
+# 核心依赖
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
+torch>=1.10.0
+torchvision>=0.11.0
+torchaudio>=0.10.0
+
+# 可视化和进度条
+matplotlib>=3.5.0
+tqdm>=4.60.0
+
+# 可选依赖（用于数据验证）
+seaborn>=0.11.0
+
+# 注意：
+# 1. PyTorch版本可能需要根据你的CUDA版本调整
+# 2. CPU版本：pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# 3. CUDA版本：pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
