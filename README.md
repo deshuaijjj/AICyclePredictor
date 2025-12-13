@@ -32,8 +32,6 @@
 - [Development Guide](#development-guide)
 - [Frequently Asked Questions](#frequently-asked-questions)
 - [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
 
 ## Core Features
 
@@ -370,13 +368,6 @@ flake8 .
 # 运行测试
 pytest model_validation/
 ```
-
-### 贡献流程
-1. Fork 项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 创建 Pull Request
 
 ## [QUESTION] 常见问题
 
