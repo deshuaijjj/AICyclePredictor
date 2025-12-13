@@ -1,8 +1,8 @@
-# 🧠 模型训练模块 (Model Training)
+#  模型训练模块 (Model Training)
 
 本文件夹包含个性化LSTM模型的训练和预测相关的所有文件。
 
-## 📁 文件说明
+##  文件说明
 
 ### 核心文件
 - `lstm_model.py` - 个性化LSTM模型实现
@@ -28,7 +28,7 @@
 - `personalized_model_metrics.json` - 个性化模型评估结果
 - `training.log` - 详细训练日志
 
-## 🚀 使用方法
+##  使用方法
 
 ### 1. 个性化模型训练
 ```bash
@@ -53,7 +53,7 @@ predictor = PersonalizedMenstrualCyclePredictor('personalized_lstm_model_complet
 result = predictor.predict(time_series_data, user_features)
 ```
 
-## 🏗️ 模型架构
+##  模型架构
 
 ### PersonalizedMultiTaskLSTM
 ```
@@ -85,7 +85,7 @@ LSTM层 (256隐藏单元):
 └── 疼痛预测分支: 回归 (0-10分)
 ```
 
-## ⚙️ 训练配置
+##  训练配置
 
 ### 个性化训练参数
 ```python
@@ -108,7 +108,7 @@ config = {
 - **神经质-压力系数**: 0.42 (应激敏感度)
 - **临床OR值**: 2.45 (痛经风险)
 
-## 📊 性能指标
+##  性能指标
 
 ### 个性化模型性能
 - **月经预测准确率**: 87.8% (+2.6%)
@@ -120,7 +120,7 @@ config = {
 - **训练时间**: 20-60分钟 (取决于硬件)
 - **存储空间**: 2GB+ (模型+数据)
 
-## 🔗 依赖关系
+##  依赖关系
 
 - **输入**: `data_generation/` 提供训练数据
 - **被调用**: `run_personalized_system.py` (一键运行)
