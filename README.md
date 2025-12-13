@@ -448,7 +448,7 @@ If this project is helpful to you, please give us a star!
 
 ****Make AI better understand every woman's health needs!****
 
-##references
+## references
 1. 陈怡，黎烈荣（指导）. 月经周期各阶段基础体温变化与中医辨证关系浅析[J]. 湖北中医杂志，2009, 31(3): 27-28.
 2. 林丽洁，黄嘉红，陈珍珍，等. 睡眠—觉醒昼夜节律及中医体质对女性月经周期的影响[J]. 山西中医，2020, 36(12): 45-47.
 3. 刘建琼. 女性情绪障碍与月经周期相关研究[J]. 中国社区医生，2010, 12(13): 80.
