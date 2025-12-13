@@ -17,6 +17,9 @@
 - Scientific Accuracy: Evidence-based approach from multiple clinical studies
 - Easy Deployment: Complete production environment deployment solution
 
+## 预告！！！
+小程序正在开发中，后续将会把云部署api，将算法实现在微信小程序中，请持续关注我们！
+
 ## Table of Contents
 
 - [Core Features](#core-features)
@@ -425,7 +428,7 @@ pre-commit run --all-files
 - **开源社区**: 各种优秀的Python库和工具
 
 ### 特别感谢
-感谢所有为女性健康研究做出贡献的科学家和研究人员，你们的成果为这个项目提供了重要的科学基础。
+感谢工作室成员以及所有为女性健康研究做出贡献的科学家和研究人员，你们的成果为这个项目提供了重要的科学基础。
 
 ---
 
@@ -439,7 +442,7 @@ pre-commit run --all-files
 ## [STAR] 星标支持
 
 If this project is helpful to you, please give us a star!
-如果有助于您的学习或工作，请给我一个星表！
+如果有助于您的学习或工作，请给我一个星标！
 
 [![GitHub stars](https://img.shields.io/github/stars/deshuaijjj/-LSTM-?style=social)](https://github.com/deshuaijjj/-LSTM-)
 
