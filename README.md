@@ -18,7 +18,7 @@
 - Easy Deployment: Complete production environment deployment solution
 
 ## 预告！！！
-小程序正在开发中，后续将会把云部署api，将算法实现在微信小程序中，请持续关注我们！
+小程序正在开发中，后续将会云部署api，将算法实现在微信小程序中，请持续关注我们！
 
 ## Table of Contents
 
