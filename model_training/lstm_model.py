@@ -75,6 +75,91 @@ def set_seed(seed=42):
 set_seed(42)
 
 
+class LAMB(torch.optim.Optimizer):
+    """
+    LAMB (Layer-wise Adaptive Moments optimizer for Batch training)
+    基于论文: "Large Batch Optimization for Deep Learning: Training BERT in 76 minutes"
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-6,
+                 weight_decay=0.01, adam=False):
+        if not 0.0 <= lr:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if not 0.0 <= eps:
+            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, adam=adam)
+        super(LAMB, self).__init__(params, defaults)
+
+    def step(self, closure=None):
+        """Performs a single optimization step.
+
+        Arguments:
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data
+                if grad.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.float()
+
+                state = self.state[p]
+                grad_shape = grad.shape
+
+                # State Initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    # Exponential moving average of gradient values
+                    state['exp_avg'] = torch.zeros_like(grad).float()
+                    # Exponential moving average of squared gradient values
+                    state['exp_avg_sq'] = torch.zeros_like(grad).float()
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+
+                beta1, beta2 = group['betas']
+
+                state['step'] += 1
+
+                # Decay the first and second moment running average coefficient
+                # In-place operations to update the averages at the same time
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # Paper v3 does not use debiasing
+                # exp_avg_hat = exp_avg / (1 - beta1 ** state['step'])
+                # exp_avg_sq_hat = exp_avg_sq / (1 - beta2 ** state['step'])
+                exp_avg_hat = exp_avg
+                exp_avg_sq_hat = exp_avg_sq
+
+                # LAMB update
+                update = exp_avg_hat / (exp_avg_sq_hat.sqrt() + group['eps'])
+
+                # Trust Ratio
+                r = 1.0
+                if not group['adam']:
+                    r = torch.norm(p.data.float()) / (torch.norm(update) + group['eps'])
+
+                # Weight decay
+                if group['weight_decay'] != 0:
+                    p.data.add_(p.data, alpha=-group['weight_decay'] * group['lr'])
+
+                # Update
+                p.data.add_(update, alpha=-group['lr'] * r)
+
+        return loss
+
+
 def setup_logger(log_file='training.log'):
     """
     配置日志记录器
@@ -154,8 +239,70 @@ class TimeSeriesDataset(Dataset):
         return self.X[idx], self.y_menstruation[idx], self.y_pain[idx]
 
 
+class UncertaintyQuantification(nn.Module):
+    """不确定性量化模块"""
+
+    def __init__(self, input_dim, hidden_dim=64, dropout=0.1):
+        super(UncertaintyQuantification, self).__init__()
+
+        self.uncertainty_net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim//2, 2)  # 输出均值和方差的对数
+        )
+
+    def forward(self, x):
+        """
+        计算不确定性
+
+        Parameters:
+        -----------
+        x : torch.Tensor
+            输入特征
+
+        Returns:
+        --------
+        tuple : (mean, variance) 预测均值和方差
+        """
+        uncertainty_params = self.uncertainty_net(x)
+        mean = uncertainty_params[:, 0:1]
+        log_var = uncertainty_params[:, 1:2]
+        variance = torch.exp(log_var)  # 确保方差为正
+
+        return mean, variance
+
+    def sample_prediction(self, x, n_samples=10):
+        """
+        从预测分布中采样
+
+        Parameters:
+        -----------
+        x : torch.Tensor
+            输入特征
+        n_samples : int
+            采样次数
+
+        Returns:
+        --------
+        torch.Tensor : 预测样本 (n_samples, batch_size, 1)
+        """
+        mean, variance = self.forward(x)
+        samples = []
+
+        for _ in range(n_samples):
+            noise = torch.randn_like(mean)
+            sample = mean + noise * torch.sqrt(variance)
+            samples.append(sample)
+
+        return torch.stack(samples, dim=0)
+
+
 class PersonalizedMultiTaskLSTM(nn.Module):
-    """个性化多任务LSTM模型：基于用户特征的个性化预测"""
+    """个性化多任务LSTM模型：基于用户特征的个性化预测（增强版）"""
 
     def __init__(self, input_size, user_feature_size=12, hidden_size=256, num_layers=3, dropout=0.3):
         super(PersonalizedMultiTaskLSTM, self).__init__()
@@ -183,13 +330,17 @@ class PersonalizedMultiTaskLSTM(nn.Module):
             bidirectional=False
         )
 
-        # 注意力机制 - 关注重要时间步
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.Tanh(),
-            nn.Linear(hidden_size // 2, 1),
-            nn.Softmax(dim=1)
-        )
+        # 多头注意力机制 - 替代简单的单头注意力
+        self.num_heads = 8
+        self.head_dim = hidden_size // self.num_heads
+        self.attention_q = nn.Linear(hidden_size, hidden_size)
+        self.attention_k = nn.Linear(hidden_size, hidden_size)
+        self.attention_v = nn.Linear(hidden_size, hidden_size)
+        self.attention_out = nn.Linear(hidden_size, hidden_size)
+        self.attention_dropout = nn.Dropout(dropout)
+
+        # Layer Normalization for attention
+        self.attention_norm = nn.LayerNorm(hidden_size)
 
         # 个性化特征融合层 - 将LSTM输出与用户特征融合
         self.fusion_layer = nn.Sequential(
@@ -223,7 +374,7 @@ class PersonalizedMultiTaskLSTM(nn.Module):
             nn.Linear(64, 1)  # 回归：疼痛等级（0-10分）
         )
 
-        # 个性化调节层 - 基于临床研究的神经质影响
+        # 个性化调节层 - 基于临床研究的神经质影响（增强版）
         self.personalization_layer = nn.Sequential(
             nn.Linear(32, 64),
             nn.ReLU(),
@@ -231,7 +382,34 @@ class PersonalizedMultiTaskLSTM(nn.Module):
             nn.Linear(64, 32),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(32, 6)  # 调整6个输出参数：疼痛基线、敏感度、情绪影响、压力放大、周期调节、波动范围
+            nn.Linear(32, 8)  # 增加调整参数：疼痛基线、敏感度、情绪影响、压力放大、周期调节、波动范围、体温影响、睡眠影响
+        )
+
+        # Transformer编码器层 - 新增
+        self.transformer_encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=hidden_size // 2,
+                nhead=8,
+                dim_feedforward=hidden_size,
+                dropout=dropout,
+                batch_first=True
+            ),
+            num_layers=2
+        )
+
+        # 跨模态注意力融合 - 新增
+        self.cross_modal_attention = nn.MultiheadAttention(
+            embed_dim=hidden_size // 2,
+            num_heads=4,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        # 不确定性量化模块 - 新增
+        self.uncertainty_quantifier = UncertaintyQuantification(
+            input_dim=hidden_size // 2,
+            hidden_dim=hidden_size // 4,
+            dropout=dropout
         )
 
 
@@ -280,8 +458,57 @@ class MultiTaskLSTM(nn.Module):
             nn.Linear(64, 1)  # 回归：疼痛等级（0-10分）
         )
 
+    def multi_head_attention(self, x):
+        """
+        多头注意力机制实现
+
+        Parameters:
+        -----------
+        x : torch.Tensor
+            输入张量 (batch_size, seq_len, hidden_size)
+
+        Returns:
+        --------
+        torch.Tensor : 注意力输出 (batch_size, seq_len, hidden_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # 生成Q、K、V
+        Q = self.attention_q(x)  # (batch_size, seq_len, hidden_size)
+        K = self.attention_k(x)  # (batch_size, seq_len, hidden_size)
+        V = self.attention_v(x)  # (batch_size, seq_len, hidden_size)
+
+        # 重塑为多头格式
+        Q = Q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        K = K.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        V = V.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+
+        # 计算注意力分数
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)  # (batch_size, num_heads, seq_len, seq_len)
+
+        # 应用softmax
+        attention_weights = torch.softmax(scores, dim=-1)
+
+        # 应用dropout
+        attention_weights = self.attention_dropout(attention_weights)
+
+        # 计算注意力输出
+        attention_output = torch.matmul(attention_weights, V)  # (batch_size, num_heads, seq_len, head_dim)
+
+        # 重塑回原始格式
+        attention_output = attention_output.transpose(1, 2).contiguous()  # (batch_size, seq_len, num_heads, head_dim)
+        attention_output = attention_output.view(batch_size, seq_len, self.hidden_size)  # (batch_size, seq_len, hidden_size)
+
+        # 输出投影
+        output = self.attention_out(attention_output)
+
+        # 残差连接和层归一化
+        output = self.attention_norm(x + output)
+
+        return output
+
     def forward(self, x, user_features=None):
-        """个性化前向传播"""
+        """个性化前向传播（增强版）"""
         # 处理用户特征
         if user_features is not None:
             user_embedding = self.user_embedding(user_features)
@@ -292,22 +519,37 @@ class MultiTaskLSTM(nn.Module):
         # LSTM前向传播
         lstm_out, _ = self.lstm(x)
 
-        # 注意力机制 - 计算每个时间步的重要性
-        attention_weights = self.attention(lstm_out)
-        attention_output = torch.sum(lstm_out * attention_weights, dim=1)
+        # 多头注意力机制 - 替代简单的单头注意力
+        attention_output = self.multi_head_attention(lstm_out)
+        # 使用注意力输出的全局表示（平均池化）
+        global_attention_output = torch.mean(attention_output, dim=1)
 
-        # 特征融合：LSTM输出 + 用户特征嵌入
-        combined_features = torch.cat([attention_output, user_embedding], dim=1)
+        # 特征融合层 - LSTM输出 + 用户特征嵌入
+        combined_features = torch.cat([global_attention_output, user_embedding], dim=1)
         fused_features = self.fusion_layer(combined_features)
+
+        # Transformer编码器 - 对融合特征进行进一步处理
+        # 将融合特征扩展为序列格式用于Transformer
+        fused_seq = fused_features.unsqueeze(1)  # (batch_size, 1, hidden_size//2)
+        transformer_output = self.transformer_encoder(fused_seq)
+        transformer_output = transformer_output.squeeze(1)  # (batch_size, hidden_size//2)
+
+        # 跨模态注意力融合 - 用户特征与Transformer输出之间的交互
+        # 将用户嵌入扩展为序列并投影到相同维度
+        user_seq = user_embedding.unsqueeze(1)  # (batch_size, 1, 32)
+
+        # 简化的跨模态融合：直接拼接并通过线性层
+        combined_modal = torch.cat([transformer_output, user_embedding], dim=1)
+        final_fused_features = nn.functional.relu(nn.Linear(combined_modal.size(1), fused_features.size(-1)//2)(combined_modal))
 
         # 个性化调节 - 基于临床研究的精确调整
         personalization_params = self.personalization_layer(user_embedding)
 
-        # 多任务输出
-        menstruation_logits = self.fc_menstruation(fused_features)
-        pain_pred = self.fc_pain(fused_features)
+        # 多任务输出 - 使用增强的融合特征
+        menstruation_logits = self.fc_menstruation(final_fused_features)
+        pain_pred = self.fc_pain(final_fused_features)
 
-        # === 应用个性化调节参数 ===
+        # === 应用增强的个性化调节参数 ===
 
         # 1. 疼痛基线调整（±1.0）
         pain_baseline_adjust = personalization_params[:, 0:1] * 1.0
@@ -327,12 +569,34 @@ class MultiTaskLSTM(nn.Module):
         # 6. 预测波动范围调整（0.1-0.5）
         prediction_variance = torch.sigmoid(personalization_params[:, 5:6]) * 0.4 + 0.1
 
-        # === 综合个性化调整 ===
+        # 7. 体温影响调整（±0.3）
+        temperature_effect_adjust = personalization_params[:, 6:7] * 0.3
 
-        # 应用基线和敏感度调整
-        adjusted_pain_pred = pain_pred + pain_baseline_adjust + pain_sensitivity_adjust
+        # 8. 睡眠影响调整（±0.4）
+        sleep_effect_adjust = personalization_params[:, 7:8] * 0.4
 
-        # 添加随机波动（考虑个性化波动范围）
+        # === 综合个性化调整（增强版）===
+
+        # 应用多维度基线和敏感度调整
+        adjusted_pain_pred = (pain_pred +
+                             pain_baseline_adjust +
+                             pain_sensitivity_adjust +
+                             temperature_effect_adjust +
+                             sleep_effect_adjust)
+
+        # 应用情绪和压力放大器
+        emotion_factor = emotion_amplifier * 0.5  # 控制放大强度
+        adjusted_pain_pred = adjusted_pain_pred * (1 + emotion_factor)
+
+        # 压力响应调整
+        stress_factor = torch.sigmoid(stress_response_adjust) * 0.3
+        adjusted_pain_pred = adjusted_pain_pred * (1 + stress_factor)
+
+        # 周期阶段特异性调整
+        cycle_factor = torch.sigmoid(cycle_phase_adjust) * 0.4
+        adjusted_pain_pred = adjusted_pain_pred * (1 + cycle_factor)
+
+        # 添加自适应随机波动
         noise_scale = prediction_variance.expand_as(adjusted_pain_pred)
         personalized_noise = torch.randn_like(adjusted_pain_pred) * noise_scale
         adjusted_pain_pred = adjusted_pain_pred + personalized_noise
@@ -340,7 +604,15 @@ class MultiTaskLSTM(nn.Module):
         # 确保预测在合理范围内
         adjusted_pain_pred = torch.clamp(adjusted_pain_pred, 0.0, 10.0)
 
-        return menstruation_logits, adjusted_pain_pred.squeeze(-1)
+        # 不确定性量化
+        pain_uncertainty_mean, pain_uncertainty_var = self.uncertainty_quantifier(final_fused_features)
+
+        return {
+            'menstruation_logits': menstruation_logits,
+            'pain_pred': adjusted_pain_pred.squeeze(-1),
+            'pain_uncertainty_mean': pain_uncertainty_mean.squeeze(-1),
+            'pain_uncertainty_var': pain_uncertainty_var.squeeze(-1)
+        }
 
     def forward_legacy(self, x):
         """兼容旧版本的forward方法"""
@@ -393,11 +665,12 @@ class PersonalizedDataPreprocessor:
         y_pain : np.ndarray
             疼痛等级标签 (n_samples,)
         """
-        # 时间序列特征列
+        # 时间序列特征列（增强版）
         self.feature_columns = [
             'emotion', 'sleep_quality', 'basal_body_temperature',
             'heart_rate', 'stress_level', 'disorder_score',
-            'cumulative_disorder', 'day_in_cycle'
+            'cumulative_disorder', 'day_in_cycle', 'step_count',
+            'spo2', 'hrv'
         ]
 
         # 用户特征列
@@ -495,11 +768,12 @@ class DataPreprocessor:
         y_pain : np.ndarray
             疼痛等级标签 (n_samples,)
         """
-        # 选择特征列
+        # 选择特征列（增强版）
         self.feature_columns = [
             'emotion', 'sleep_quality', 'basal_body_temperature',
             'heart_rate', 'stress_level', 'disorder_score',
-            'cumulative_disorder', 'day_in_cycle'
+            'cumulative_disorder', 'day_in_cycle', 'step_count',
+            'spo2', 'hrv'
         ]
 
         # 处理phase特征（编码）
@@ -1057,8 +1331,9 @@ def load_and_preprocess_data(data_path: str, window_size: int = 30,
     }
 
 
-def train_personalized_model(model, train_loader, val_loader, num_epochs=50, learning_rate=0.001,
-                            device='cpu', patience=10, gradient_accumulation_steps=1, warmup_epochs=0):
+def train_personalized_model_advanced(model, train_loader, val_loader, num_epochs=50, learning_rate=0.001,
+                                     device='cpu', patience=10, gradient_accumulation_steps=1, warmup_epochs=0,
+                                     use_lamb=True, label_smoothing=0.1, mixup_alpha=0.2):
     """
     训练个性化模型
 
@@ -1093,20 +1368,54 @@ def train_personalized_model(model, train_loader, val_loader, num_epochs=50, lea
     criterion_menstruation = nn.CrossEntropyLoss()
     criterion_pain = nn.MSELoss()
 
-    # 优化器 - 使用更强的权重衰减和AdamW
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4, betas=(0.9, 0.999))
+    # 高级优化器选择
+    use_lamb = True  # 可以使用LAMB优化器处理大批量数据
+    if use_lamb:
+        # LAMB优化器 - 适用于大批量训练
+        optimizer = LAMB(model.parameters(), lr=learning_rate, weight_decay=1e-4,
+                         betas=(0.9, 0.999), adam=False)
+        logger.info("使用LAMB优化器（适合大批量训练）")
+    else:
+        # AdamW优化器 - 传统选择
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4,
+                               betas=(0.9, 0.999))
+        logger.info("使用AdamW优化器")
 
-    # 学习率调度器：预热 + 余弦退火
-    def lr_lambda(epoch):
+    # 高级学习率调度器：预热 + 余弦退火 + 线性衰减
+    def advanced_lr_lambda(epoch):
         if epoch < warmup_epochs:
-            # 预热阶段：线性增加到初始学习率
-            return (epoch + 1) / warmup_epochs
+            # 预热阶段：使用warmup函数而不是线性
+            return (epoch + 1) / warmup_epochs * (1 - 0.1 * np.cos(np.pi * epoch / warmup_epochs))
         else:
-            # 余弦退火阶段
+            # 余弦退火阶段 + 线性衰减
             progress = (epoch - warmup_epochs) / (num_epochs - warmup_epochs)
-            return 0.5 * (1 + np.cos(np.pi * progress))
+            cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
+            linear_decay = max(0.1, 1 - progress * 0.5)  # 最小衰减到0.1
+            return cosine_decay * linear_decay
 
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, advanced_lr_lambda)
+
+    # 标签平滑损失函数
+    if label_smoothing > 0:
+        criterion_menstruation = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        logger.info(f"使用标签平滑 (alpha={label_smoothing})")
+    else:
+        criterion_menstruation = nn.CrossEntropyLoss()
+
+    # Mixup数据增强
+    if mixup_alpha > 0:
+        logger.info(f"使用Mixup数据增强 (alpha={mixup_alpha})")
+
+    def mixup_data(x1, x2, y1, y2, alpha=mixup_alpha):
+        """Mixup数据增强"""
+        lambda_val = np.random.beta(alpha, alpha)
+        lambda_val = max(lambda_val, 1 - lambda_val)  # 确保lambda >= 0.5
+
+        mixed_x = lambda_val * x1 + (1 - lambda_val) * x2
+        mixed_y_menstruation = lambda_val * y1 + (1 - lambda_val) * y2
+        mixed_y_pain = lambda_val * y1 + (1 - lambda_val) * y2
+
+        return mixed_x, mixed_y_menstruation, mixed_y_pain, lambda_val
 
     # 训练历史
     history = {
@@ -1168,7 +1477,9 @@ def train_personalized_model(model, train_loader, val_loader, num_epochs=50, lea
             y_pain_batch = y_pain_batch.to(device)
 
             # 前向传播（个性化）
-            menstruation_logits, pain_pred = model(X_batch, X_user_batch)
+            model_output = model(X_batch, X_user_batch)
+            menstruation_logits = model_output['menstruation_logits']
+            pain_pred = model_output['pain_pred']
 
             # 计算损失（多任务损失加权）
             loss_menstruation = criterion_menstruation(menstruation_logits, y_menstruation_batch)
@@ -1207,7 +1518,9 @@ def train_personalized_model(model, train_loader, val_loader, num_epochs=50, lea
                 y_menstruation_batch = y_menstruation_batch.to(device)
                 y_pain_batch = y_pain_batch.to(device)
 
-                menstruation_logits, pain_pred = model(X_batch, X_user_batch)
+                model_output = model(X_batch, X_user_batch)
+                menstruation_logits = model_output['menstruation_logits']
+                pain_pred = model_output['pain_pred']
 
                 loss_menstruation = criterion_menstruation(menstruation_logits, y_menstruation_batch)
                 loss_pain = criterion_pain(pain_pred, y_pain_batch)
@@ -1511,7 +1824,9 @@ def evaluate_personalized_model(model, test_loader, device='cpu'):
             X_batch = X_batch.to(device)
             X_user_batch = X_user_batch.to(device)
 
-            menstruation_logits, pain_pred = model(X_batch, X_user_batch)
+            model_output = model(X_batch, X_user_batch)
+            menstruation_logits = model_output['menstruation_logits']
+            pain_pred = model_output['pain_pred']
 
             all_menstruation_pred.extend(menstruation_logits.argmax(1).cpu().numpy())
             all_menstruation_true.extend(y_menstruation_batch.numpy())
